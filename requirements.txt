@@ -1,0 +1,23 @@
+# requirements.txt
+# Instalar con: pip install -r requirements.txt
+
+# Reconocimiento facial
+face_recognition==1.3.0          # wrapper de dlib
+opencv-python==4.9.0.80          # captura de cámara y procesamiento
+numpy==1.26.4
+
+# Base de datos MySQL
+mysql-connector-python==8.3.0
+
+# API REST
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9          # para upload de archivos
+pydantic==2.7.1
+
+# Seguridad
+bcrypt==4.1.3
+PyJWT==2.8.0
+
+# Variables de entorno
+python-dotenv==1.0.1
