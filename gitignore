@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+*.egg-info/
+
+# Entorno
+.env
+
+# Fotos y capturas (no subir al repo)
+backend/photos/
+backend/captures/
+*.jpg
+*.jpeg
+*.png
+*.gif
+
+# Base de datos local
+*.sql.bak
+
+# VS Code
+.vscode/
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
