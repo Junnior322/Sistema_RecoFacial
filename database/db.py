@@ -1,130 +1,140 @@
 # database/db.py
-# ============================================================
-#  Conexión y operaciones CRUD con MySQL (mysql-connector-python)
-# ============================================================
-
+import os
 import json
 import mysql.connector
-from mysql.connector import pooling
-from config import DB_CONFIG
+import mysql.connector.pooling
+from dotenv import load_dotenv
 
-# Pool de conexiones (reutiliza hasta 5 conexiones simultáneas)
-_pool = pooling.MySQLConnectionPool(
-    pool_name="facial_pool",
-    pool_size=5,
-    **DB_CONFIG,
-)
+load_dotenv()
 
+_pool = None
+
+def get_pool():
+    global _pool
+    if _pool is None:
+        host     = os.getenv("DB_HOST", "localhost")
+        port     = int(os.getenv("DB_PORT", 3306))
+        user     = os.getenv("DB_USER", "root")
+        password = os.getenv("DB_PASSWORD", "")
+        database = os.getenv("DB_NAME", "facial_recognition_db")
+        kwargs   = dict(
+            pool_name="upsjb_pool", pool_size=5,
+            host=host, port=port, user=user,
+            password=password, database=database,
+            connection_timeout=30,
+            pool_reset_session=True,
+        )
+        if "aivencloud.com" in host:
+            kwargs["ssl_disabled"] = False
+        _pool = mysql.connector.pooling.MySQLConnectionPool(**kwargs)
+    return _pool
 
 def get_conn():
-    """Retorna una conexión del pool."""
-    return _pool.get_connection()
+    return get_pool().get_connection()
 
-
-# ── Estudiantes ─────────────────────────────────────────────
 
 def get_todos_estudiantes():
-    """Devuelve lista de dicts con datos de estudiantes y si tienen embedding."""
     conn = get_conn()
     cur  = conn.cursor(dictionary=True)
-    cur.execute("SELECT * FROM v_estudiantes_completo ORDER BY nombre_completo")
+    cur.execute("""
+        SELECT e.id, e.codigo,
+               CONCAT(e.nombres,' ',e.apellidos) AS nombre_completo,
+               e.email, c.nombre AS carrera, f.nombre AS facultad,
+               CASE WHEN ef.id IS NOT NULL THEN 'Si' ELSE 'No' END AS tiene_embedding,
+               e.activo, e.foto_path
+        FROM estudiantes e
+        JOIN carreras   c  ON c.id = e.carrera_id
+        JOIN facultades f  ON f.id = c.facultad_id
+        LEFT JOIN embeddings_faciales ef ON ef.estudiante_id = e.id
+        WHERE e.activo = 1
+        ORDER BY e.created_at DESC
+    """)
     rows = cur.fetchall()
     cur.close(); conn.close()
     return rows
 
 
-def get_estudiante_by_id(estudiante_id: int):
+def get_estudiante_by_id(id: int):
     conn = get_conn()
     cur  = conn.cursor(dictionary=True)
-    cur.execute("SELECT * FROM v_estudiantes_completo WHERE id = %s", (estudiante_id,))
+    cur.execute("""
+        SELECT e.id, e.codigo,
+               CONCAT(e.nombres,' ',e.apellidos) AS nombre_completo,
+               e.nombres, e.apellidos, e.email,
+               c.nombre AS carrera, f.nombre AS facultad,
+               CASE WHEN ef.id IS NOT NULL THEN 'Si' ELSE 'No' END AS tiene_embedding,
+               e.activo, e.foto_path
+        FROM estudiantes e
+        JOIN carreras   c  ON c.id = e.carrera_id
+        JOIN facultades f  ON f.id = c.facultad_id
+        LEFT JOIN embeddings_faciales ef ON ef.estudiante_id = e.id
+        WHERE e.id = %s
+    """, (id,))
     row = cur.fetchone()
     cur.close(); conn.close()
     return row
 
 
-def insertar_estudiante(carrera_id, codigo, nombres, apellidos, email, foto_path=None):
+def insertar_estudiante(carrera_id, codigo, nombres, apellidos, email):
     conn = get_conn()
     cur  = conn.cursor()
-    sql  = """INSERT INTO estudiantes
-              (carrera_id, codigo, nombres, apellidos, email, foto_path)
-              VALUES (%s, %s, %s, %s, %s, %s)"""
-    cur.execute(sql, (carrera_id, codigo, nombres, apellidos, email, foto_path))
+    cur.execute("""
+        INSERT INTO estudiantes (carrera_id, codigo, nombres, apellidos, email)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (carrera_id, codigo, nombres, apellidos, email))
     conn.commit()
     new_id = cur.lastrowid
     cur.close(); conn.close()
     return new_id
 
 
-def actualizar_foto(estudiante_id: int, foto_path: str):
+def actualizar_foto(id: int, foto_path: str):
     conn = get_conn()
     cur  = conn.cursor()
-    cur.execute("UPDATE estudiantes SET foto_path=%s WHERE id=%s",
-                (foto_path, estudiante_id))
+    cur.execute("UPDATE estudiantes SET foto_path=%s WHERE id=%s", (foto_path, id))
     conn.commit()
     cur.close(); conn.close()
 
 
-def desactivar_estudiante(estudiante_id: int):
+def guardar_embedding(estudiante_id: int, embedding: list):
     conn = get_conn()
     cur  = conn.cursor()
-    cur.execute("UPDATE estudiantes SET activo=0 WHERE id=%s", (estudiante_id,))
-    conn.commit()
-    cur.close(); conn.close()
-
-
-# ── Embeddings ───────────────────────────────────────────────
-
-def guardar_embedding(estudiante_id: int, embedding: list, modelo="face_recognition_v1"):
-    """Inserta o actualiza el embedding de un estudiante."""
-    conn = get_conn()
-    cur  = conn.cursor()
-    sql  = """INSERT INTO embeddings_faciales (estudiante_id, embedding, modelo)
-              VALUES (%s, %s, %s)
-              ON DUPLICATE KEY UPDATE
-                  embedding = VALUES(embedding),
-                  modelo    = VALUES(modelo),
-                  actualizado_at = CURRENT_TIMESTAMP"""
-    cur.execute(sql, (estudiante_id, json.dumps(embedding), modelo))
+    cur.execute("DELETE FROM embeddings_faciales WHERE estudiante_id=%s", (estudiante_id,))
+    cur.execute("""
+        INSERT INTO embeddings_faciales (estudiante_id, embedding_json)
+        VALUES (%s, %s)
+    """, (estudiante_id, json.dumps(embedding)))
     conn.commit()
     cur.close(); conn.close()
 
 
 def cargar_todos_embeddings():
-    """
-    Carga todos los embeddings activos para el reconocedor en memoria.
-    Retorna lista de dicts: {estudiante_id, nombre_completo, codigo, embedding}
-    """
     conn = get_conn()
     cur  = conn.cursor(dictionary=True)
-    sql  = """
-        SELECT e.id AS estudiante_id,
+    cur.execute("""
+        SELECT ef.estudiante_id, ef.embedding_json,
                CONCAT(e.nombres,' ',e.apellidos) AS nombre_completo,
-               e.codigo,
-               ef.embedding
-        FROM   embeddings_faciales ef
-        JOIN   estudiantes e ON e.id = ef.estudiante_id
-        WHERE  e.activo = 1
-    """
-    cur.execute(sql)
+               e.codigo
+        FROM embeddings_faciales ef
+        JOIN estudiantes e ON e.id = ef.estudiante_id
+        WHERE e.activo = 1
+    """)
     rows = cur.fetchall()
     cur.close(); conn.close()
-    # Parsear JSON → lista Python
+    result = []
     for r in rows:
-        r["embedding"] = json.loads(r["embedding"])
-    return rows
+        r["embedding"] = json.loads(r["embedding_json"])
+        result.append(r)
+    return result
 
 
-# ── Accesos ──────────────────────────────────────────────────
-
-def registrar_acceso(resultado: str, confianza: float = None,
-                     estudiante_id: int = None,
-                     camara_id: int = 0, captura_path: str = None):
+def registrar_acceso(resultado, confianza, estudiante_id=None, camara_id=0, captura_path=None):
     conn = get_conn()
     cur  = conn.cursor()
-    sql  = """INSERT INTO accesos
-              (estudiante_id, resultado, confianza, camara_id, captura_path)
-              VALUES (%s, %s, %s, %s, %s)"""
-    cur.execute(sql, (estudiante_id, resultado, confianza, camara_id, captura_path))
+    cur.execute("""
+        INSERT INTO accesos (estudiante_id, resultado, confianza, camara_id, captura_path)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (estudiante_id, resultado, confianza, camara_id, captura_path))
     conn.commit()
     acceso_id = cur.lastrowid
     cur.close(); conn.close()
@@ -134,7 +144,16 @@ def registrar_acceso(resultado: str, confianza: float = None,
 def get_accesos_hoy():
     conn = get_conn()
     cur  = conn.cursor(dictionary=True)
-    cur.execute("SELECT * FROM v_accesos_hoy")
+    cur.execute("""
+        SELECT a.id, a.resultado, a.confianza, a.camara_id, a.accedido_at,
+               CONCAT(e.nombres,' ',e.apellidos) AS estudiante,
+               e.codigo
+        FROM accesos a
+        LEFT JOIN estudiantes e ON e.id = a.estudiante_id
+        WHERE DATE(a.accedido_at) = CURDATE()
+        ORDER BY a.accedido_at DESC
+        LIMIT 100
+    """)
     rows = cur.fetchall()
     cur.close(); conn.close()
     return rows
@@ -144,57 +163,62 @@ def get_resumen_accesos(dias: int = 7):
     conn = get_conn()
     cur  = conn.cursor(dictionary=True)
     cur.execute("""
-        SELECT * FROM v_resumen_accesos
-        WHERE fecha >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
+        SELECT DATE(accedido_at) AS fecha, resultado, COUNT(*) AS total
+        FROM accesos
+        WHERE accedido_at >= DATE_SUB(NOW(), INTERVAL %s DAY)
+        GROUP BY fecha, resultado
+        ORDER BY fecha
     """, (dias,))
     rows = cur.fetchall()
     cur.close(); conn.close()
     return rows
 
 
-# ── Alertas ──────────────────────────────────────────────────
-
-def crear_alerta(acceso_id: int, tipo: str, descripcion: str = None):
-    conn = get_conn()
-    cur  = conn.cursor()
-    cur.execute("""INSERT INTO alertas (acceso_id, tipo, descripcion)
-                   VALUES (%s, %s, %s)""",
-                (acceso_id, tipo, descripcion))
-    conn.commit()
-    cur.close(); conn.close()
-
-
 def get_alertas_pendientes():
     conn = get_conn()
     cur  = conn.cursor(dictionary=True)
     cur.execute("""
-        SELECT al.*, a.accedido_at, a.camara_id
-        FROM alertas al
-        JOIN accesos a ON a.id = al.acceso_id
-        WHERE al.resuelta = 0
-        ORDER BY al.created_at DESC
+        SELECT id, tipo, descripcion, resuelta, created_at
+        FROM alertas WHERE resuelta = 0
+        ORDER BY created_at DESC
     """)
     rows = cur.fetchall()
     cur.close(); conn.close()
     return rows
 
 
-def resolver_alerta(alerta_id: int):
+def crear_alerta(acceso_id, tipo, descripcion):
     conn = get_conn()
     cur  = conn.cursor()
-    cur.execute("UPDATE alertas SET resuelta=1 WHERE id=%s", (alerta_id,))
+    cur.execute("""
+        INSERT INTO alertas (acceso_id, tipo, descripcion)
+        VALUES (%s, %s, %s)
+    """, (acceso_id, tipo, descripcion))
     conn.commit()
     cur.close(); conn.close()
 
 
-# ── Carreras / Facultades ────────────────────────────────────
+def resolver_alerta(id: int):
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute("UPDATE alertas SET resuelta=1 WHERE id=%s", (id,))
+    conn.commit()
+    cur.close(); conn.close()
+
+
+def desactivar_estudiante(id: int):
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute("UPDATE estudiantes SET activo=0 WHERE id=%s", (id,))
+    conn.commit()
+    cur.close(); conn.close()
+
 
 def get_carreras():
     conn = get_conn()
     cur  = conn.cursor(dictionary=True)
     cur.execute("""
-        SELECT c.id, c.codigo, c.nombre,
-               f.nombre AS facultad
+        SELECT c.id, c.nombre, f.nombre AS facultad
         FROM carreras c
         JOIN facultades f ON f.id = c.facultad_id
         ORDER BY f.nombre, c.nombre
